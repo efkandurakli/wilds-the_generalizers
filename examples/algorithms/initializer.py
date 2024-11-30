@@ -11,6 +11,7 @@ from algorithms.IRM import IRM
 from algorithms.fixmatch import FixMatch
 from algorithms.pseudolabel import PseudoLabel
 from algorithms.noisy_student import NoisyStudent
+from examples.algorithms.dgmedia import DGMedIA
 from configs.supported import algo_log_metrics, losses
 from losses import initialize_loss
 
@@ -123,6 +124,14 @@ def initialize_algorithm(config, datasets, train_grouper, unlabeled_dataset=None
             grouper=train_grouper,
             loss=loss,
             unlabeled_loss=unlabeled_loss,
+            metric=metric,
+            n_train_steps=n_train_steps)
+    elif config.algorithm == 'DGMedIA':
+        algorithm = DGMedIA(
+            config=config,
+            d_out=d_out,
+            grouper=train_grouper,
+            loss=loss,
             metric=metric,
             n_train_steps=n_train_steps)
     else:
