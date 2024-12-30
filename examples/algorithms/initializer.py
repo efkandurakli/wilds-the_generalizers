@@ -127,13 +127,26 @@ def initialize_algorithm(config, datasets, train_grouper, unlabeled_dataset=None
             metric=metric,
             n_train_steps=n_train_steps)
     elif config.algorithm == 'DGMedIA':
+        metadata_array = train_dataset.metadata_array
+        groups = train_grouper.metadata_to_group(metadata_array)
+        group_counts = get_counts(groups, train_grouper.n_groups)
+        group_ids_to_domains = group_counts.tolist()
+        domain_idx = 0
+        for i, count in enumerate(group_ids_to_domains):
+            if count > 0:
+                group_ids_to_domains[i] = domain_idx
+                domain_idx += 1
+        group_ids_to_domains = torch.tensor(group_ids_to_domains, dtype=torch.long)
         algorithm = DGMedIA(
             config=config,
             d_out=d_out,
             grouper=train_grouper,
             loss=loss,
             metric=metric,
-            n_train_steps=n_train_steps)
+            n_train_steps=n_train_steps,
+            n_domains = domain_idx,
+            group_ids_to_domains=group_ids_to_domains,
+        )
     else:
         raise ValueError(f"Algorithm {config.algorithm} not recognized")
 
