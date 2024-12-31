@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torchvision
+from torchvision.models.resnet import ResNet18_Weights
 import torch.nn.functional as F
 from algorithms.single_model_algorithm import SingleModelAlgorithm
 from models.initializer import initialize_model
@@ -8,6 +9,7 @@ from utils import move_to
 from wilds.common.utils import split_into_groups
 from utils import concat_input
 from losses import initialize_loss
+from optimizer import initialize_optimizer_with_model_params
 
 def reconstruction_loss(original_image, reconstructed_image):
     mse_loss = nn.MSELoss()
@@ -34,17 +36,6 @@ def coral_penalty(x, y):
     return mean_diff + cova_diff
 
 class AutomaticWeightedLoss(nn.Module):
-    """automatically weighted multi-task loss
-
-    Params：
-        num: int，the number of loss
-        x: multi-task loss
-    Examples：
-        loss1=1
-        loss2=2
-        awl = AutomaticWeightedLoss(2)
-        loss_sum = awl(loss1, loss2)
-    """
     def __init__(self, num=2):
         super(AutomaticWeightedLoss, self).__init__()
         params = torch.ones(num, requires_grad=True)
@@ -60,27 +51,27 @@ class AutomaticWeightedLoss(nn.Module):
 class Encoder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.model = torchvision.models.resnet18()
+        self.model = torchvision.models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
         self.model.fc = nn.Identity()
         
     def forward(self, x):
         return self.model(x)
     
 
-class DomainClassifier(nn.Sequential):
+class Classifier(nn.Sequential):
 
     def __init__(
-        self, in_feature: int, n_domains, hidden_size: int = 512
+        self, in_feature: int, n_classes, hidden_size: int = 512
     ):
 
-        super(DomainClassifier, self).__init__(
+        super(Classifier, self).__init__(
             nn.Linear(in_feature, hidden_size),
             nn.BatchNorm1d(hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.BatchNorm1d(hidden_size),
             nn.ReLU(),
-            nn.Linear(hidden_size, n_domains),
+            nn.Linear(hidden_size, n_classes),
         )
 
 
@@ -113,12 +104,32 @@ class Decoder(nn.Module):
         
         return reconstructed
 
+class DGMedIAModel(nn.Module):
+    def __init__(self, device, n_classes, n_domains):
+        super(DGMedIAModel, self).__init__()
         
+        self.content_encoder = Encoder().to(device)
+        self.style_encoder = Encoder().to(device)
+        self.decoder = Decoder().to(device)
+        self.classifier = Classifier(in_feature=512, n_classes=n_classes).to(device)
+        self.domain_classifier = Classifier(in_feature=512, n_classes=n_domains).to(device)
         
+    
+    def forward(self, x):
+        content_features = self.content_encoder(x)
+        style_features = self.style_encoder(x)
+        y_preds = self.classifier(content_features)
+        domains_pred = self.domain_classifier(style_features)
+        reconstructed_image = self.decoder(content_features, style_features)
+        
+        return content_features, style_features, reconstructed_image, y_preds, domains_pred
+
+
 class DGMedIA(SingleModelAlgorithm):
     
     def __init__(self, config, d_out, grouper, loss, metric, n_train_steps, n_domains, group_ids_to_domains):
-        model = initialize_model(config, d_out)
+        model = DGMedIAModel(config.device, d_out, n_domains)
+        model.needs_y = False
         # initialize module
         super().__init__(
             config=config,
@@ -128,16 +139,12 @@ class DGMedIA(SingleModelAlgorithm):
             metric=metric,
             n_train_steps=n_train_steps,
         )
+        
+        
         self.group_ids_to_domains = group_ids_to_domains.to(self.device)
+
         
-        self.content_encoder = Encoder().to(self.device)
-        self.style_encoder = Encoder().to(self.device)
-        self.decoder = Decoder().to(self.device)
-        self.domain_classifier = DomainClassifier(in_feature=512, n_domains=n_domains).to(self.device)
-        
-        self.awl = AutomaticWeightedLoss(4).to(self.device)
-        
-    
+
     def process_batch(self, batch, unlabeled_batch=None):
         x, y_true, metadata = batch
         
@@ -147,29 +154,19 @@ class DGMedIA(SingleModelAlgorithm):
                 
         domains_true = self.group_ids_to_domains[g]
         self.domain_loss = initialize_loss('cross_entropy', None)
+        
+        
+        content_features, style_features, reconstructed_image, y_preds, domains_pred = self.get_model_output(x, y_true)
 
-        content = F.instance_norm(x)
-        style = x - content
-        
-        
-        outputs = self.get_model_output(x, y_true)
-        
-        content_features = self.content_encoder(content)
-        style_features = self.style_encoder(style)
-        
-        reconstructed = self.decoder(content_features, style_features)
-        
-        domains_pred = self.domain_classifier(style_features)
-        
         results = {
             'input': x,
             'g': g,
             'y_true': y_true,
-            'y_pred': outputs,
+            'y_pred': y_preds,
             'metadata': metadata,
             'content_features': content_features,
             'style_features': style_features,
-            'reconstructed_image': reconstructed,
+            'reconstructed_image': reconstructed_image,
             'domains_true': domains_true,
             'domains_pred': domains_pred
             
@@ -179,7 +176,7 @@ class DGMedIA(SingleModelAlgorithm):
     def objective(self, results):
         if self.is_training:
             input = results.pop('input')
-            features = results.pop('content_features')
+            content_features = results.pop('content_features')
             reconstructed_image = results.pop('reconstructed_image')
 
             # Split into groups
@@ -191,7 +188,7 @@ class DGMedIA(SingleModelAlgorithm):
             penalty = torch.zeros(1, device=self.device)
             for i_group in range(n_groups_per_batch):
                 for j_group in range(i_group+1, n_groups_per_batch):
-                    penalty += coral_penalty(features[group_indices[i_group]], features[group_indices[j_group]])
+                    penalty += coral_penalty(content_features[group_indices[i_group]], content_features[group_indices[j_group]])
             if n_groups_per_batch > 1:
                 penalty /= (n_groups_per_batch * (n_groups_per_batch-1) / 2) # get the mean penalty
 
@@ -211,16 +208,13 @@ class DGMedIA(SingleModelAlgorithm):
             self.save_metric_for_logging(
                 results, "domain_classification_loss", domain_classification_loss
             )
-            
-            self.save_metric_for_logging(
-                results, "reconstruction_loss", rec_loss
-            )
+
             
             self.save_metric_for_logging(
                 results, "coral_loss", penalty
             )
             
-            avg_loss = self.awl(classification_loss, domain_classification_loss, rec_loss, penalty[0])
+            avg_loss = classification_loss + 0.1*domain_classification_loss + 0.1*penalty + 0.1*rec_loss
             
             return avg_loss
         
