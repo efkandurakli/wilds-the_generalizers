@@ -88,6 +88,8 @@ class DeepCORAL(SingleModelAlgorithm):
         """
         # forward pass
         x, y_true, metadata = batch
+        
+        
         y_true = y_true.to(self.device)
         g = self.grouper.metadata_to_group(metadata).to(self.device)
 

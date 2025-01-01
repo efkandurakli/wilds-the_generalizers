@@ -80,8 +80,11 @@ algorithm_defaults = {
         'additional_train_transform': 'randaugment',     # Apply strong augmentation to labeled & unlabeled examples
     },
     'DGMedIA': {
-        'train_loader': 'standard',
-        'uniform_over_groups': False,
+        'train_loader': 'group',
+        'uniform_over_groups': True,
+        'distinct_groups': True,
         'eval_loader': 'standard',
+        # 'randaugment_n': 2,
+        # 'additional_train_transform': 'randaugment',  
     }
 }
